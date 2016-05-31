@@ -1,0 +1,22 @@
+{
+  "name": "currentweather",
+  "components": {
+    "java": {
+      "image": "registry.giantswarm.io/$GIANTSWARM_LOGIN_NAME/currentweather-java:latest",
+      "ports": [4567],
+      "links": [
+        {
+          "component": "redis",
+          "target_port": 6379
+        }
+      ],
+      "domains": {
+        "4567": "currentweather-$GIANTSWARM_LOGIN_NAME.gigantic.io"
+      }
+    },
+    "redis": {
+      "image": "redis:latest",
+      "ports": [6379]
+    }
+  }
+}
