@@ -13,4 +13,7 @@ RUN mvn dependency:resolve && mvn verify
 ADD src /code/src
 RUN mvn package
 
-ENTRYPOINT ["/usr/lib/jvm/java-8-openjdk-amd64/bin/java", "-jar", "target/giantswarm-importer-jar-with-dependencies.jar"]
+# Adding swarm.json
+ADD swarm.json /code/swarm.json
+
+ENTRYPOINT ["/usr/lib/jvm/java-8-openjdk-amd64/bin/java", "-jar", "target/giantswarm-importer-0.0.1-jar-with-dependencies.jar"]
