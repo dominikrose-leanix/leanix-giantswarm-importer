@@ -3,7 +3,9 @@ package de.leanix.giantswarm_importer;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.io.IOUtils;
 import org.json.JSONArray;
@@ -13,6 +15,7 @@ import net.leanix.api.ResourcesApi;
 import net.leanix.api.ServicesApi;
 import net.leanix.api.common.ApiClient;
 import net.leanix.api.common.ApiException;
+import net.leanix.api.models.FactSheetHasParent;
 import net.leanix.api.models.FactSheetHasRequires;
 import net.leanix.api.models.Resource;
 import net.leanix.api.models.Service;
@@ -49,6 +52,9 @@ public class Importer {
 	public Importer() {
 		client = new net.leanix.api.common.ApiClientBuilder().withBasePath(API_BASE_PATH)
 				.withTokenProviderHost(TOKEN_HOST).withPersonalAccessToken(TOKEN).withDebugging(true).build();
+		// client = new
+		// net.leanix.api.common.ApiClientBuilder().withBasePath(API_BASE_PATH)
+		// .withApiKey("cc571b9c0a73e4003c9976d4b8f9145c").withDebugging(true).build();
 
 		metricsClient = new ApiClientBuilder().withBasePath(METRICS_API_BASE_PATH).withTokenProviderHost(TOKEN_HOST)
 				.withPersonalAccessToken(TOKEN).withDebugging(true).build();
@@ -96,18 +102,70 @@ public class Importer {
 
 	private void createResources(JSONObject json, Service service) throws ApiException {
 		JSONObject jsonObject = json.getJSONObject("components");
-		for (String key : jsonObject.keySet()) {
-			Resource createdResource = createOrUpdateResource(key, jsonObject.getJSONObject(key).toString(), "");
 
-			ServiceHasResource serviceHasResource = new ServiceHasResource();
-			serviceHasResource.setServiceID(service.getID());
-			serviceHasResource.setResourceID(createdResource.getID());
-			servicesApi.createServiceHasResource(service.getID(), serviceHasResource);
+		Map<String, Resource> resources = new HashMap<String, Resource>();
+		for (String key : jsonObject.keySet()) {
+			Resource resource = new Resource();
+			resource.setName(key.replace("/", " / "));
+			resource.setDescription(jsonObject.getJSONObject(key).toString());
+
+			Resource existingResource = getResource(resource.getName(), resource.getRelease());
+			if (existingResource != null) {
+				resource.setID(existingResource.getID());
+				resource.setDisplayName(existingResource.getDisplayName());
+			} else {
+				int index = key.indexOf("/");
+				existingResource = getResource(key.substring(index + 1, key.length()), resource.getRelease());
+				if (existingResource != null) {
+					resource.setID(existingResource.getID());
+					resource.setDisplayName(existingResource.getDisplayName());
+				} else {
+					resource = resourcesApi.createResource(resource);
+				}
+			}
+			resources.put(key, resource);
 		}
 
-		for (String key : jsonObject.keySet()) {
+		for (String key : resources.keySet()) {
+			if (key.contains("/")) {
+				int index = key.indexOf("/");
+				Resource child = resources.get(key);
+				if (!child.getDisplayName().contains("/")) {
+					Resource parent = resources.get(key.substring(0, index));
+
+					FactSheetHasParent factSheetHasParent = new FactSheetHasParent();
+					factSheetHasParent.setFactSheetID(child.getID());
+					factSheetHasParent.setFactSheetRefID(parent.getID());
+					resourcesApi.createFactSheetHasParent(child.getID(), factSheetHasParent);
+
+					Resource newChild = resourcesApi.getResource(child.getID(), false);
+					child.setDisplayName(newChild.getDisplayName());
+				}
+			}
+		}
+
+		processLinks(jsonObject, resources);
+		processImages(jsonObject, resources);
+
+	}
+
+	private void processImages(JSONObject jsonObject, Map<String, Resource> resources) throws ApiException {
+		for (String key : resources.keySet()) {
+			Resource resource = resources.get(key);
 			JSONObject component = jsonObject.getJSONObject(key);
-			Resource resource = getResource(key, "");
+			processImage(component, resource);
+		}
+	}
+
+	private void processLinks(JSONObject jsonObject, Map<String, Resource> resources) throws ApiException {
+		for (String key : resources.keySet()) {
+			Resource resource = resources.get(key);
+			for (FactSheetHasRequires factSheetHasRequires : resourcesApi
+					.getFactSheetHasRequiresAll(resource.getID())) {
+				resourcesApi.deleteFactSheetHasRequires(resource.getID(), factSheetHasRequires.getID());
+			}
+
+			JSONObject component = jsonObject.getJSONObject(key);
 
 			if (component.has("links")) {
 				JSONArray links = component.getJSONArray("links");
@@ -115,32 +173,51 @@ public class Importer {
 				for (Object object : links) {
 					JSONObject link = (JSONObject) object;
 
-					Resource requiredResource = getResource(link.getString("component"), "");
+					Resource requiredResource = resources.get(link.getString("component"));
 
 					FactSheetHasRequires factSheetHasRequires = new FactSheetHasRequires();
 					factSheetHasRequires.setFactSheetID(resource.getID());
 					factSheetHasRequires.setFactSheetRefID(requiredResource.getID());
 					resourcesApi.createFactSheetHasRequires(resource.getID(), factSheetHasRequires);
-
 				}
 			}
+		}
+	}
 
-			if (component.has("image")) {
-				String image = component.getString("image");
-				int index = image.indexOf(":");
-				Resource requiredResource = createOrUpdateResource(image.substring(0, index), "",
-						image.substring(index + 1, image.length()));
-				requiredResource.getTags().add("image");
-				resourcesApi.updateResource(requiredResource.getID(), requiredResource);
-
-				FactSheetHasRequires factSheetHasRequires = new FactSheetHasRequires();
-				factSheetHasRequires.setFactSheetID(resource.getID());
-				factSheetHasRequires.setFactSheetRefID(requiredResource.getID());
-				resourcesApi.createFactSheetHasRequires(resource.getID(), factSheetHasRequires);
-
+	private Resource getResource(String name, String release) throws ApiException {
+		Resource resource = null;
+		for (Resource existingResource : resourcesApi.getResources(true, name)) {
+			if (name.equals(existingResource.getDisplayName())
+					&& (release == null || release.equals(existingResource.getRelease()))) {
+				resource = existingResource;
+				break;
 			}
 		}
+		return resource;
+	}
 
+	private void processImage(JSONObject component, Resource resource) throws ApiException {
+		if (component.has("image")) {
+			String image = component.getString("image");
+
+			Resource requiredResource;
+			if (image.contains(":")) {
+				int index = image.indexOf(":");
+				requiredResource = createOrUpdateResource(image.substring(0, index), "",
+						image.substring(index + 1, image.length()));
+			} else {
+				requiredResource = createOrUpdateResource(image, "", "");
+			}
+
+			requiredResource.getTags().add("image");
+			resourcesApi.updateResource(requiredResource.getID(), requiredResource);
+
+			FactSheetHasRequires factSheetHasRequires = new FactSheetHasRequires();
+			factSheetHasRequires.setFactSheetID(resource.getID());
+			factSheetHasRequires.setFactSheetRefID(requiredResource.getID());
+			resourcesApi.createFactSheetHasRequires(resource.getID(), factSheetHasRequires);
+
+		}
 	}
 
 	private Resource createOrUpdateResource(String name, String description, String release) throws ApiException {
@@ -150,16 +227,21 @@ public class Importer {
 			setResourceParams(name, description, release, resource);
 			resource = resourcesApi.createResource(resource);
 		} else {
-			setResourceParams(name, description, release, resource);
-			resource = resourcesApi.updateResource(resource.getID(), resource);
-
-			for (FactSheetHasRequires factSheetHasRequires : resourcesApi
-					.getFactSheetHasRequiresAll(resource.getID())) {
-				resourcesApi.deleteFactSheetHasRequires(resource.getID(), factSheetHasRequires.getID());
-			}
+			resource = updateResource(name, description, release, resource);
 
 		}
 
+		return resource;
+	}
+
+	private Resource updateResource(String name, String description, String release, Resource resource)
+			throws ApiException {
+		setResourceParams(name, description, release, resource);
+		resource = resourcesApi.updateResource(resource.getID(), resource);
+
+		for (FactSheetHasRequires factSheetHasRequires : resourcesApi.getFactSheetHasRequiresAll(resource.getID())) {
+			resourcesApi.deleteFactSheetHasRequires(resource.getID(), factSheetHasRequires.getID());
+		}
 		return resource;
 	}
 
@@ -168,17 +250,6 @@ public class Importer {
 		resource.setDescription(description);
 		resource.setResourceType("SOFTWARE");
 		resource.setRelease(release);
-	}
-
-	private Resource getResource(String name, String release) throws ApiException {
-		Resource resource = null;
-		for (Resource existingResource : resourcesApi.getResources(true, name)) {
-			if (name.equals(existingResource.getName()) && release.equals(existingResource.getRelease())) {
-				resource = existingResource;
-				break;
-			}
-		}
-		return resource;
 	}
 
 	private Service createOrUpdateService(JSONObject json) throws ApiException {
