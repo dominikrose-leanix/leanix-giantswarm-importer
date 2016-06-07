@@ -10,7 +10,7 @@ ADD pom.xml /code/pom.xml
 RUN mvn dependency:resolve && mvn verify
 
 # Adding source, compile and package into a fat jar
-ADD src /src/main/java/de/leanix/giantswarm_importer
+ADD src /code/src
 RUN mvn package
 
-ENTRYPOINT ["/usr/lib/jvm/java-8-openjdk-amd64/bin/java", "-jar", "target/giantswarm-importer.jar"]
+ENTRYPOINT ["/usr/lib/jvm/java-8-openjdk-amd64/bin/java", "-jar", "target/giantswarm-importer-0.0.1-SNAPSHOT.jar"]
