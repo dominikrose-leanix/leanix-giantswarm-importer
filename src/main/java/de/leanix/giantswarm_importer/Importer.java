@@ -2,10 +2,12 @@ package de.leanix.giantswarm_importer;
 
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 
 import org.apache.commons.io.IOUtils;
 import org.json.JSONArray;
@@ -38,26 +40,48 @@ public class Importer {
 	private static final String TOKEN = System.getenv("TOKEN");
 	private static final String WORKSPACE = System.getenv("WORKSPACE");
 
+	private static final String DEBUG = System.getenv("DEBUG");
+
 	private ApiClient client;
 	private ServicesApi servicesApi;
 	private ResourcesApi resourcesApi;
 
 	private net.leanix.dropkit.apiclient.ApiClient metricsClient;
 	private PointsApi pointsApi;
+	private Service service;
 
 	public static void main(String[] args) throws Exception {
-		new Importer().doImport("swarm.json");
+		final Importer i = new Importer();
+
+		i.doImport("swarm.json");
+
+		new Runnable() {
+
+			public void run() {
+				while (true) {
+					try {
+						i.createUserMetric();
+
+						Thread.sleep(10000);
+					} catch (Exception e) {
+						e.printStackTrace();
+					}
+					System.out.println("Thread T1 : ");
+				}
+			}
+
+		}.run();
+		;
+
 	}
 
 	public Importer() {
 		client = new net.leanix.api.common.ApiClientBuilder().withBasePath(API_BASE_PATH)
-				.withTokenProviderHost(TOKEN_HOST).withPersonalAccessToken(TOKEN).withDebugging(true).build();
-		// client = new
-		// net.leanix.api.common.ApiClientBuilder().withBasePath(API_BASE_PATH)
-		// .withApiKey("cc571b9c0a73e4003c9976d4b8f9145c").withDebugging(true).build();
+				.withTokenProviderHost(TOKEN_HOST).withPersonalAccessToken(TOKEN)
+				.withDebugging(Boolean.getBoolean(DEBUG)).build();
 
 		metricsClient = new ApiClientBuilder().withBasePath(METRICS_API_BASE_PATH).withTokenProviderHost(TOKEN_HOST)
-				.withPersonalAccessToken(TOKEN).withDebugging(true).build();
+				.withPersonalAccessToken(TOKEN).withDebugging(Boolean.getBoolean(DEBUG)).build();
 
 		servicesApi = new ServicesApi(client);
 		resourcesApi = new ResourcesApi(client);
@@ -65,17 +89,23 @@ public class Importer {
 	}
 
 	public void doImport(String file) throws Exception {
+		long start = System.currentTimeMillis();
+
 		InputStream is = new FileInputStream(file);
 		JSONObject json = new JSONObject(IOUtils.toString(is));
 
-		Service service = createOrUpdateService(json);
-		deleteAllServiceHasResources(service);
-		createResources(json, service);
-		createDeployment(service);
+		service = createOrUpdateService(json);
+		System.out.println("Created service");
+		deleteAllServiceHasResources();
+		createResources(json);
+
+		long deploymentTime = System.currentTimeMillis() - start;
+		createDeploymentMetric(deploymentTime);
+		System.out.println("Created deployment metrics");
+
 	}
 
-	private void createDeployment(Service service) throws net.leanix.dropkit.apiclient.ApiException {
-
+	private void createDeploymentMetric(long duration) throws net.leanix.dropkit.apiclient.ApiException {
 		Point point = new Point();
 		point.setMeasurement("Deployments");
 		point.setWorkspaceId(WORKSPACE);
@@ -84,23 +114,53 @@ public class Importer {
 		Field field = new Field();
 		field.setK("deployments");
 		field.setV(1.0);
+		Field field2 = new Field();
+		field2.setK("duration");
+		field2.setV(duration + 0.0);
+
+		point.getFields().add(field);
+		point.getFields().add(field2);
 
 		Tag tag = new Tag();
 		tag.setK("application");
 		tag.setV(service.getID());
 
 		point.getTags().add(tag);
-		point.getFields().add(field);
+
 		pointsApi.createPoint(point);
 	}
 
-	private void deleteAllServiceHasResources(Service service) throws ApiException {
+	public void createUserMetric() throws net.leanix.dropkit.apiclient.ApiException {
+		Point point = new Point();
+		point.setMeasurement("demoMeasurement");
+		point.setWorkspaceId(WORKSPACE);
+		point.setTime(new Date());
+
+		Field field = new Field();
+		field.setK("visitors_per_day");
+
+		Random randomGenerator = new Random();
+		field.setV(randomGenerator.nextInt(2000) + 0.0);
+
+		point.getFields().add(field);
+
+		Tag tag = new Tag();
+		tag.setK("factSheetId");
+		tag.setV(service.getID());
+
+		point.getTags().add(tag);
+
+		pointsApi.createPoint(point);
+
+	}
+
+	private void deleteAllServiceHasResources() throws ApiException {
 		for (ServiceHasResource serviceHasResource : servicesApi.getServiceHasResources(service.getID())) {
 			servicesApi.deleteServiceHasResource(service.getID(), serviceHasResource.getID());
 		}
 	}
 
-	private void createResources(JSONObject json, Service service) throws ApiException {
+	private void createResources(JSONObject json) throws ApiException {
 		JSONObject jsonObject = json.getJSONObject("components");
 
 		Map<String, Resource> resources = new HashMap<String, Resource>();
@@ -125,6 +185,18 @@ public class Importer {
 			}
 			resources.put(key, resource);
 		}
+		System.out.println("Created resources");
+
+		for (String key : resources.keySet()) {
+			if (!key.contains("/")) {
+				Resource resource = resources.get(key);
+				ServiceHasResource serviceHasResource = new ServiceHasResource();
+				serviceHasResource.setResourceID(resource.getID());
+				serviceHasResource.setServiceID(service.getID());
+				servicesApi.createServiceHasResource(service.getID(), serviceHasResource);
+			}
+		}
+		System.out.println("Created service has resources");
 
 		for (String key : resources.keySet()) {
 			if (key.contains("/")) {
@@ -143,9 +215,13 @@ public class Importer {
 				}
 			}
 		}
+		System.out.println("Created parent / childs");
 
 		processLinks(jsonObject, resources);
+		System.out.println("Created links");
+
 		processImages(jsonObject, resources);
+		System.out.println("Created images");
 
 	}
 
@@ -153,7 +229,29 @@ public class Importer {
 		for (String key : resources.keySet()) {
 			Resource resource = resources.get(key);
 			JSONObject component = jsonObject.getJSONObject(key);
-			processImage(component, resource);
+			if (component.has("image")) {
+				String image = component.getString("image");
+
+				Resource requiredResource;
+				if (image.contains(":")) {
+					int index = image.indexOf(":");
+					requiredResource = createOrUpdateResource(image.substring(0, index), "",
+							image.substring(index + 1, image.length()));
+				} else {
+					requiredResource = createOrUpdateResource(image, "", "");
+				}
+
+				List<String> tags = new ArrayList<String>();
+				tags.add("image");
+				requiredResource.setTags(tags);
+				resourcesApi.updateResource(requiredResource.getID(), requiredResource);
+
+				FactSheetHasRequires factSheetHasRequires = new FactSheetHasRequires();
+				factSheetHasRequires.setFactSheetID(resource.getID());
+				factSheetHasRequires.setFactSheetRefID(requiredResource.getID());
+				resourcesApi.createFactSheetHasRequires(resource.getID(), factSheetHasRequires);
+
+			}
 		}
 	}
 
@@ -194,30 +292,6 @@ public class Importer {
 			}
 		}
 		return resource;
-	}
-
-	private void processImage(JSONObject component, Resource resource) throws ApiException {
-		if (component.has("image")) {
-			String image = component.getString("image");
-
-			Resource requiredResource;
-			if (image.contains(":")) {
-				int index = image.indexOf(":");
-				requiredResource = createOrUpdateResource(image.substring(0, index), "",
-						image.substring(index + 1, image.length()));
-			} else {
-				requiredResource = createOrUpdateResource(image, "", "");
-			}
-
-			requiredResource.getTags().add("image");
-			resourcesApi.updateResource(requiredResource.getID(), requiredResource);
-
-			FactSheetHasRequires factSheetHasRequires = new FactSheetHasRequires();
-			factSheetHasRequires.setFactSheetID(resource.getID());
-			factSheetHasRequires.setFactSheetRefID(requiredResource.getID());
-			resourcesApi.createFactSheetHasRequires(resource.getID(), factSheetHasRequires);
-
-		}
 	}
 
 	private Resource createOrUpdateResource(String name, String description, String release) throws ApiException {
