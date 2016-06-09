@@ -166,16 +166,24 @@ public class Importer {
 		Map<String, Resource> resources = new HashMap<String, Resource>();
 		for (String key : jsonObject.keySet()) {
 			Resource resource = new Resource();
-			resource.setName(key.replace("/", " / "));
+
+			int index = key.indexOf("/");
+			if (index != -1) {
+				resource.setName(key.substring(index + 1, key.length()));
+				resource.setDisplayName(key.replace("/", " / "));
+			} else {
+				resource.setName(key);
+				resource.setDisplayName(key);
+			}
+
 			resource.setDescription(jsonObject.getJSONObject(key).toString());
 
-			Resource existingResource = getResource(resource.getName(), resource.getRelease());
+			Resource existingResource = getResource(resource.getDisplayName(), resource.getRelease());
 			if (existingResource != null) {
 				resource.setID(existingResource.getID());
 				resource.setDisplayName(existingResource.getDisplayName());
 			} else {
-				int index = key.indexOf("/");
-				existingResource = getResource(key.substring(index + 1, key.length()), resource.getRelease());
+				existingResource = getResource(resource.getName(), resource.getRelease());
 				if (existingResource != null) {
 					resource.setID(existingResource.getID());
 					resource.setDisplayName(existingResource.getDisplayName());
@@ -188,12 +196,16 @@ public class Importer {
 		System.out.println("Created resources");
 
 		for (String key : resources.keySet()) {
+			Resource resource = resources.get(key);
 			if (!key.contains("/")) {
-				Resource resource = resources.get(key);
 				ServiceHasResource serviceHasResource = new ServiceHasResource();
 				serviceHasResource.setResourceID(resource.getID());
 				serviceHasResource.setServiceID(service.getID());
 				servicesApi.createServiceHasResource(service.getID(), serviceHasResource);
+			} else {
+				List<String> tags = new ArrayList<String>();
+				tags.add("component");
+				resource.setTags(tags);
 			}
 		}
 		System.out.println("Created service has resources");
@@ -202,9 +214,17 @@ public class Importer {
 			if (key.contains("/")) {
 				int index = key.indexOf("/");
 				Resource child = resources.get(key);
-				if (!child.getDisplayName().contains("/")) {
-					Resource parent = resources.get(key.substring(0, index));
+				Resource parent = resources.get(key.substring(0, index));
 
+				boolean exists = false;
+				for (FactSheetHasParent factSheetHasParent : resourcesApi.getFactSheetHasParents(child.getID())) {
+					if (factSheetHasParent.getFactSheetRefID().equals(parent.getID())) {
+						exists = true;
+						break;
+					}
+				}
+
+				if (!exists) {
 					FactSheetHasParent factSheetHasParent = new FactSheetHasParent();
 					factSheetHasParent.setFactSheetID(child.getID());
 					factSheetHasParent.setFactSheetRefID(parent.getID());
